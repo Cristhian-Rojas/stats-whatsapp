@@ -1,47 +1,40 @@
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import StreamingResponse
+from tempfile import NamedTemporaryFile
 import findspark 
 findspark.init()
-
 from pyspark.sql import SparkSession
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 from pyspark.sql.types import *
 from pyspark.sql.window import Window
+import io
+import csv
 import emoji
 import regex
+import json
+
+app = FastAPI()
 
 spark = SparkSession.builder.appName('firstSession')\
-    .config('spark.local.dir', r'C:\Users\PC\AppData\Local\Temp\spark-eliminar') \
-    .config('spark.sql.warehouse.dir', r'C:\Users\PC\AppData\Local\Temp\spark-eliminar') \
-    .config('spark.master','local[4]')\
-    .config('spark.executor.memory','1g')\
-    .config('spark.driver.memory','1g')\
-    .config('spark.sql.shuffle.partitions','1').getOrCreate()
-    
-#1era config es para que se ejecute en local con 4 nucleos 
-#2da config es para que se ejecute con 1gb de memoria
-#3era config es para que se ejecute con 1gb de memoria
-#4ta config es para que se ejecute con 1 particion
-#5ta config es para que se ejecute con la version de spark 3.0 para poder ordenar fechas con formato dd/mm/yyyy
+   .config('spark.master','local[4]')\
+   .config('spark.executor.memory','1g')\
+   .config('spark.driver.memory','1g')\
+   .config('spark.sql.shuffle.partitions','1').getOrCreate()
 
-def read(path):
+def read_and_process(file_path):
+
+   
     # Crear un DataFrame a partir del archivo de texto
+     # Crear un DataFrame a partir del archivo de texto
 
-    df = spark.read.text(path)
+    df = spark.read.text(file_path)
     
     # Agregar un índice a las filas para que no se tenga que filtrar por fecha y hora ya que tenemos la hora en formato am y pm lo cual lo hace tedioso ordenar 
     df = df.withColumn("index", F.monotonically_increasing_id())
-    
-    # # Determinar si la línea tiene patrón de fecha y hora si la linea no tiene fecha y hora se esta obviando pero se debe de concatenar con la linea anterior
-    # # df = df.withColumn("is_datetime", F.regexp_extract(df["value"], r"^\d{1,2}/\d{1,2}/\d{4}, \d{1,2}:\d{2} [ap]\. m\.", 0))
-    
-    # # df = df.filter(F.col("is_datetime") == "")
-    # # df.show(truncate=False)
-    
-    # Dividir la columna 'value' en 'fechahora' y 'nombremensaje'
+   
     df = df.withColumn("fechahora", F.split(F.col("value"),' - ').getItem(0))
     
-    # df = df.filter(F.col("fechahora") == "26/5/2023, 4:24 p. m.")
-    # df.show(truncate=False)
     
     df = df.withColumn("nombremensaje", F.split(F.col("value"),' - ').getItem(1))
     df = df.select("index","fechahora", "nombremensaje")
@@ -69,29 +62,20 @@ def read(path):
     
     # Seleccionar las columnas deseadas
     df = df.select("Fecha", "Hora", "Nombres", "Mensaje")
-    #null son mensajes eliminados o para ver solo una vez
-    #df.na.drop()
+   
     
-    # df = df.filter(F.col("Fecha") == '10/1/2022')
-    # df = df.filter(F.col("Hora") >= '4:56 p. m.')
-    # df.show(truncate=False)
-    #print('df sin editar',df.count())
+    def obtener_emojis(mensaje):
+        emoji_lista = []
+        data = regex.findall(r'\X', mensaje)
+        for caracter in data:
+            if any(c in emoji.UNICODE_EMOJI['es'] for c in caracter):
+                emoji_lista.append(caracter)
+        return emoji_lista
 
-    return df
-
-def obtener_emojis(mensaje):
-    emoji_lista = []
-    data = regex.findall(r'\X', mensaje)
-    for caracter in data:
-        if any(c in emoji.UNICODE_EMOJI['es'] for c in caracter):
-            emoji_lista.append(caracter)
-    return emoji_lista
-
-# Crear una UDF a partir de la función obtener_emojis
-obtener_emojis_udf = F.udf(obtener_emojis, ArrayType(StringType()))
-
-def getMembersStats(df):
-    # Obtener los nombres de los miembros del grupo y su total de mensajes enviados
+    # Crear una UDF a partir de la función obtener_emojis
+    obtener_emojis_udf = F.udf(obtener_emojis, ArrayType(StringType()))
+    
+    # ... Lógica de procesamiento de datos con PySpark (tu lógica actual de la función `read` y `getMembersStats`)
     df = df.select("Nombres", "Mensaje")
     df = df.withColumn("Multimedia", F.when(F.col("Mensaje") == "<Multimedia omitido>", 1).otherwise(0))
     df = df.withColumn("Links", F.when(F.col("Mensaje").contains("https"), 1).otherwise(0))
@@ -112,28 +96,29 @@ def getMembersStats(df):
     )
     
     df = df.orderBy("Total de mensajes enviados", ascending=False)
-    return df
+    df.show(truncate=False)
+    # Reemplaza esta parte con tu lógica de procesamiento
 
-def main():
-    #variables a usar 
-    pathtxt = r'chats\Chat de WhatsApp con Lu 💕.txt'
-    
-    df = read(pathtxt)
-    # Mostrar el DataFrame resultante
-    #df.show(truncate=False)
-    #print(df.count())
-    
-    #obtener miembros del chat o grupo 
-    dfMembers = getMembersStats(df)
-    dfMembers.show(truncate=False)
-    # Ruta local donde quieres guardar el archivo CSV
-    output_path = r'C:\Users\PC\Desktop\reportes'
-    
-    # Guardar el DataFrame como archivo CSV en el directorio local
-    dfMembers.coalesce(1).write.mode('overwrite').option("header", True).option("delimiter", "|").csv(output_path)
-    
-    
-    
-if __name__ == "__main__":
-    main()
-    spark.stop()
+    json_content = df.toJSON().collect()
+
+    return json_content
+
+@app.post("/procesar_archivo")
+async def upload_file(file: UploadFile = File(...)):
+    # Verificar si se subió un archivo
+    if not file:
+        raise HTTPException(status_code=400, detail="No se ha proporcionado un archivo")
+
+    # Guardar el archivo temporalmente
+    with NamedTemporaryFile(delete=False) as temp_file:
+        temp_file.write(await file.read())
+        temp_file_name = temp_file.name
+
+    # Procesar el archivo y obtener el contenido del DataFrame procesado como un archivo CSV
+    json_content = read_and_process(temp_file_name)
+
+    # Analizar las cadenas JSON y convertirlas en objetos Python
+    parsed_content = [json.loads(item) for item in json_content]
+
+    # Devolver el contenido JSON como respuesta
+    return parsed_content
