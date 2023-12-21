@@ -116,7 +116,7 @@ def getMembersStats(df):
 
 def main():
     #variables a usar 
-    pathtxt = r'chats\Chat de WhatsApp con Lu 💕.txt'
+    pathtxt = r"chats\Chat de WhatsApp con Lobitos 2.0 .txt"
     
     df = read(pathtxt)
     # Mostrar el DataFrame resultante
